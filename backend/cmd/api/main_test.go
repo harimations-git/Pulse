@@ -1,55 +1,113 @@
 package main
 
 import (
-	"context"
-	"errors"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
-	"time"
-
-	"github.com/harimations-git/pulse/backend/internal/monitor"
 )
 
-func TestCheckServiceStatucCodes(t *testing.T) {
-	tests := []struct {
-		name        string
-		statusCode  int
-		wantHealthy bool
-	}{
-		{"OK", 200, true},
-		{"Created", 201, true},
-		{"Bad Request", 400, false},
-		{"Not Found", 404, false},
-		{"Server Error", 500, false},
+func TestHealthHandler(t *testing.T) {
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/health",
+		nil,
+	)
+
+	recorder := httptest.NewRecorder()
+
+	healthHandler(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Errorf(
+			"Expected status 200, got %d",
+			recorder.Code,
+		)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	contentType := recorder.Header().Get("Content-Type")
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(tc.statusCode)
-				}),
-			)
+	if contentType != "application/json" {
+		t.Errorf(
+			"Expected application/json, got %s",
+			contentType,
+		)
+	}
 
-			defer server.Close()
+	expectedBody := "{\"status\":\"ok\"}\n"
 
-			result := monitor.CheckService(server.URL, client)
-
-			if result.Healthy != tc.wantHealthy {
-				t.Errorf("Expected healthy %t, got %t", tc.wantHealthy, result.Healthy)
-			}
-
-			if result.StatusCode != tc.statusCode {
-				t.Errorf("Expected status %d, got %d", tc.statusCode, result.StatusCode)
-			}
-		})
+	if recorder.Body.String() != expectedBody {
+		t.Errorf(
+			"Expected %q, got %q",
+			expectedBody,
+			recorder.Body.String(),
+		)
 	}
 }
-func TestCheckServiceHealthy(t *testing.T) {
 
+func TestCheckHandlerEmptyURL(t *testing.T) {
+	body := strings.NewReader(`{"url":""}`)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/monitors/check",
+		body,
+	)
+
+	recorder := httptest.NewRecorder()
+
+	checkHandler(recorder, req)
+
+	if recorder.Code != 400 {
+		t.Errorf(
+			"Expected status 400, got %d",
+			recorder.Code,
+		)
+	}
+
+	if !strings.Contains(recorder.Body.String(), "URL is required") {
+		t.Errorf(
+			"Expected 'URL is required', got %q",
+			recorder.Body.String(),
+		)
+	}
+}
+
+func TestCheckHandlerInvalidJSON(t *testing.T) {
+
+	body := strings.NewReader(`{"url":`)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/monitors/check",
+		body,
+	)
+
+	recorder := httptest.NewRecorder()
+
+	checkHandler(recorder, req)
+
+	if recorder.Code != 400 {
+		t.Errorf(
+			"Expected status 400, got %d",
+			recorder.Code,
+		)
+	}
+
+	if !strings.Contains(recorder.Body.String(), "Invalid JSON") {
+		t.Errorf(
+			"Expected 'Invalid JSON', got %q",
+			recorder.Body.String(),
+		)
+	}
+}
+
+func TestCheckHandlerSuccess(t *testing.T) {
+
+	// Create a mock server that returns HTTP 200
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -57,70 +115,56 @@ func TestCheckServiceHealthy(t *testing.T) {
 	)
 	defer server.Close()
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	// Create JSON request containing the mock server URL
+	body := fmt.Sprintf(`{"url":"%s"}`, server.URL)
 
-	result := monitor.CheckService(server.URL, client)
-
-	if !result.Healthy {
-		t.Error("Exepcted service to be healthy")
-	}
-
-	if result.StatusCode != 200 {
-		t.Errorf("Expected status 200, got %d", result.StatusCode)
-	}
-}
-
-func TestCheckServiceUnhealthy(t *testing.T) {
-
-	server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}),
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/monitors/check",
+		strings.NewReader(body),
 	)
-	defer server.Close()
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	// Capture the API response
+	recorder := httptest.NewRecorder()
 
-	result := monitor.CheckService(server.URL, client)
+	// Call our monitoring API handler
+	checkHandler(recorder, req)
 
-	if result.Healthy {
-		t.Error("Exepected service to be unhealthy")
+	// Verify HTTP status
+	if recorder.Code != http.StatusOK {
+		t.Errorf(
+			"Expected status 200, got %d",
+			recorder.Code,
+		)
 	}
 
-	if result.StatusCode != 503 {
-		t.Errorf("Expected status to be 503, got %d", result.StatusCode)
+	// Decode the JSON response
+	var response CheckResponse
+
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal("Failed to decode response:", err)
 	}
 
-}
-
-func TestServerTimeout(t *testing.T) {
-
-	server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(500 * time.Millisecond)
-			w.WriteHeader(http.StatusOK)
-		}),
-	)
-	defer server.Close()
-
-	client := &http.Client{Timeout: 100 * time.Millisecond}
-
-	result := monitor.CheckService(server.URL, client)
-
-	if result.Healthy {
-		t.Error("Exepected service to be unhealthy")
+	if response.URL != server.URL {
+		t.Errorf(
+			"Expected URL %s, got %s",
+			server.URL,
+			response.URL,
+		)
 	}
 
-	if result.StatusCode != 0 {
-		t.Errorf("Expected status to be 0, got %d", result.StatusCode)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf(
+			"Expected status 200, got %d",
+			response.StatusCode,
+		)
 	}
 
-	if result.Err == nil {
-		t.Fatal("Expected a timeout error, got nil")
+	if !response.Healthy {
+		t.Error("Expected service to be healthy")
 	}
 
-	if !errors.Is(result.Err, context.DeadlineExceeded) {
-		t.Errorf("Expected deadline exceeded error, got %v", result.Err)
+	if response.Error != "" {
+		t.Errorf("Expected no error, got %s", response.Error)
 	}
-
 }

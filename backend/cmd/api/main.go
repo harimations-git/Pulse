@@ -1,67 +1,90 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/harimations-git/pulse/backend/internal/monitor"
 )
 
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	data := map[string]string{
+		"status": "ok",
+	}
+
+	json.NewEncoder(w).Encode(data)
+}
+
 func main() {
-	urls := []string{
-		"https://harimations-git.github.io/",
-		"https://google.com",
-		"https://github.com",
-		"https://www.youtube.com/watch?v=dDr0gTqMkyE",
-		"https://www.linkedin.com/notifications/",
+
+	http.HandleFunc("GET /health", healthHandler)
+	http.HandleFunc("POST /monitors/check", checkHandler)
+
+	fmt.Println("Pulse API running on port 8080")
+
+	err := http.ListenAndServe(":8080", nil)
+	if err != nil {
+		fmt.Println("Server error:", err)
 	}
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
+}
+
+func checkHandler(w http.ResponseWriter, r *http.Request) {
+	var req CheckRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
 	}
 
-	jobs := make(chan string)
-	results := make(chan monitor.CheckResult)
-
-	workerCount := 2
-
-	start := time.Now()
-
-	// Start the workers
-	for range workerCount {
-		go monitor.Worker(jobs, results, client)
+	if req.URL == "" {
+		http.Error(w, "URL is required", http.StatusBadRequest)
+		return
 	}
 
-	fmt.Println("Pulse - Service Monitor")
-
-	// Submit URLs to the workers
-	go func() {
-		for _, url := range urls {
-			jobs <- url
-		}
-
-		close(jobs)
-	}()
-
-	// Collect the results
-	checkResults := make([]monitor.CheckResult, 0, len(urls))
-
-	for range urls {
-		result := <-results
-		checkResults = append(checkResults, result)
+	parsedURL, err := url.Parse(req.URL)
+	if err != nil ||
+		(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
+		parsedURL.Hostname() == "" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
 	}
 
-	elapsedTime := time.Since(start)
+	client := &http.Client{Timeout: 5 * time.Second}
 
-	// Display the results
-	for _, result := range checkResults {
-		fmt.Println("URL:", result.URL)
-		fmt.Println("HTTP Status:", result.StatusCode)
-		fmt.Println("Response Time:", result.ResponseTime)
-		fmt.Println("Healthy:", result.Healthy)
-		fmt.Println()
+	result := monitor.CheckService(req.URL, client)
+
+	response := CheckResponse{
+		URL:            result.URL,
+		StatusCode:     result.StatusCode,
+		ResponseTimeMs: result.ResponseTime.Seconds() * 1000,
+		Healthy:        result.Healthy,
 	}
 
-	fmt.Println("Total elapsed time:", elapsedTime)
+	if result.Err != nil {
+		response.Error = result.Err.Error()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		fmt.Println("Failed to encode response:", err)
+	}
+}
+
+type CheckResponse struct {
+	URL            string  `json:"url"`
+	StatusCode     int     `json:"statusCode"`
+	ResponseTimeMs float64 `json:"responseTimeMs"`
+	Healthy        bool    `json:"healthy"`
+	Error          string  `json:"error,omitempty"`
+}
+
+type CheckRequest struct {
+	URL string `json:"url"`
 }
