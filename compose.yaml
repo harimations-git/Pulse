@@ -1,0 +1,20 @@
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: pulse-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: pulse
+      POSTGRES_PASSWORD: pulse_dev_password
+      POSTGRES_DB: pulse
+
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql
+
+volumes:
+  postgres_data:
