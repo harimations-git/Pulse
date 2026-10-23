@@ -28,16 +28,23 @@ func main() {
 	defer cancel()
 
 	db, err := database.Connect(ctx, os.Getenv("DATABASE_URL"))
+
 	if err != nil {
 		fmt.Println("Database connection failed:", err)
 		return
 	}
 	defer db.Close()
 
+	repo := database.NewMonitorRepository(db)
+
 	fmt.Println("Connected to PostgreSQL successfully!")
 
 	http.HandleFunc("GET /health", healthHandler)
 	http.HandleFunc("POST /monitors/check", checkHandler)
+
+	http.HandleFunc("GET /monitors", func(w http.ResponseWriter, r *http.Request) {
+		getMonitorsHandler(w, r, repo)
+	})
 
 	fmt.Println("Pulse API running on port 8080")
 
@@ -88,6 +95,32 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		fmt.Println("Failed to encode response:", err)
+	}
+}
+
+func getMonitorsHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+	repo *database.MonitorRepository,
+) {
+	// Retrieve monitors from PostgreSQL
+	monitors, err := repo.GetAll(r.Context())
+
+	// Handle database errors
+	if err != nil {
+		http.Error(
+			w,
+			"Failed to retrieve monitors",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	// Return monitors as JSON
+	w.Header().Set("Content-Type", "application/json")
+
+	if err := json.NewEncoder(w).Encode(monitors); err != nil {
+		fmt.Println("Failed to encode monitors:", err)
 	}
 }
 
