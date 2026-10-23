@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
+	"github.com/harimations-git/pulse/backend/internal/database"
 	"github.com/harimations-git/pulse/backend/internal/monitor"
 )
 
@@ -21,13 +24,24 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	db, err := database.Connect(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		fmt.Println("Database connection failed:", err)
+		return
+	}
+	defer db.Close()
+
+	fmt.Println("Connected to PostgreSQL successfully!")
 
 	http.HandleFunc("GET /health", healthHandler)
 	http.HandleFunc("POST /monitors/check", checkHandler)
 
 	fmt.Println("Pulse API running on port 8080")
 
-	err := http.ListenAndServe(":8080", nil)
+	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
 		fmt.Println("Server error:", err)
 	}
