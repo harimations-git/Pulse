@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/harimations-git/pulse/backend/internal/database"
@@ -44,6 +45,10 @@ func main() {
 
 	http.HandleFunc("GET /monitors", func(w http.ResponseWriter, r *http.Request) {
 		getMonitorsHandler(w, r, repo)
+	})
+
+	http.HandleFunc("POST /monitors", func(w http.ResponseWriter, r *http.Request) {
+		createMonitorHandler(w, r, repo)
 	})
 
 	fmt.Println("Pulse API running on port 8080")
@@ -124,6 +129,61 @@ func getMonitorsHandler(
 	}
 }
 
+func createMonitorHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+	repo *database.MonitorRepository,
+) {
+	var req CreateMonitorRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate monitor name
+	if strings.TrimSpace(req.Name) == "" {
+		http.Error(w, "Monitor name is required", http.StatusBadRequest)
+		return
+	}
+
+	parsedURL, err := url.Parse(req.URL)
+
+	if err != nil ||
+		(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
+		parsedURL.Hostname() == "" ||
+		parsedURL.User != nil {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+
+	if req.IntervalSeconds <= 0 {
+		http.Error(w, "Interval must be greater than zero", http.StatusBadRequest)
+		return
+	}
+
+	// 4. Call repo.Create() using r.Context().
+	created, err := repo.Create(
+		r.Context(),
+		req.Name,
+		req.URL,
+		req.IntervalSeconds,
+	)
+	// 5. Handle database errors.
+	if err != nil {
+		http.Error(w, "Failed to create monitor", http.StatusInternalServerError)
+		return
+	}
+	// Return HTTP 201 Created
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+
+	// Return the created monitor as JSON
+	if err := json.NewEncoder(w).Encode(created); err != nil {
+		fmt.Println("Failed to encode monitor:", err)
+	}
+}
+
 type CheckResponse struct {
 	URL            string  `json:"url"`
 	StatusCode     int     `json:"statusCode"`
@@ -134,4 +194,10 @@ type CheckResponse struct {
 
 type CheckRequest struct {
 	URL string `json:"url"`
+}
+
+type CreateMonitorRequest struct {
+	Name            string `json:"name"`
+	URL             string `json:"url"`
+	IntervalSeconds int    `json:"intervalSeconds"`
 }

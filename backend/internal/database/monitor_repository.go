@@ -21,30 +21,24 @@ func (repo *MonitorRepository) GetAll(
 	ctx context.Context,
 ) ([]monitor.Monitor, error) {
 
-	// 1. Execute SELECT query
 	rows, err := repo.DB.Query(ctx, `
         SELECT id, name, url, interval_seconds, created_at
         FROM monitors
         ORDER BY id
     `)
 
-	// 2. Handle query error
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve monitors: %w", err)
 	}
 
-	// 3. Defer closing rows
 	defer rows.Close()
 
-	// 4. Create an empty slice
-
 	monitors := []monitor.Monitor{}
-	// 5. Loop through rows
+
 	for rows.Next() {
 
-		// Create a Monitor struct
 		var m monitor.Monitor
-		// Scan row values into the struct
+
 		err := rows.Scan(
 			&m.ID,
 			&m.Name,
@@ -52,19 +46,49 @@ func (repo *MonitorRepository) GetAll(
 			&m.IntervalSeconds,
 			&m.CreatedAt,
 		)
-		// Handle scanning errors
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan monitor: %w", err)
 		}
-		// Append monitor to slice
 		monitors = append(monitors, m)
 	}
 
-	// 6. Check rows.Err()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("failed to iterate monitors: %w", err)
 	}
 
-	// 7. Return the slice and nil error
 	return monitors, nil
+}
+
+func (repo *MonitorRepository) Create(
+	ctx context.Context,
+	name string,
+	url string,
+	intervalSeconds int,
+) (monitor.Monitor, error) {
+
+	// 1. Declare a Monitor variable
+	var m monitor.Monitor
+	// 2. Execute INSERT ... RETURNING using QueryRow()
+	row := repo.DB.QueryRow(ctx, `
+		INSERT INTO monitors (name, url, interval_seconds)
+		VALUES ($1, $2, $3)
+		RETURNING id, name, url, interval_seconds, created_at
+	`, name, url, intervalSeconds)
+	// 3. Scan the returned row into your Monitor struct
+	err := row.Scan(
+		&m.ID,
+		&m.Name,
+		&m.URL,
+		&m.IntervalSeconds,
+		&m.CreatedAt,
+	)
+
+	// 4. If scanning fails, return an error
+	// Hint: return monitor.Monitor{}, err
+	if err != nil {
+		return monitor.Monitor{},
+			fmt.Errorf("failed to create monitor: %w", err)
+	}
+	// 5. Return the created Monitor and nil
+	return m, nil
 }
