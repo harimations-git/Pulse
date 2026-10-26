@@ -66,15 +66,14 @@ func (repo *MonitorRepository) Create(
 	intervalSeconds int,
 ) (monitor.Monitor, error) {
 
-	// 1. Declare a Monitor variable
 	var m monitor.Monitor
-	// 2. Execute INSERT ... RETURNING using QueryRow()
+
 	row := repo.DB.QueryRow(ctx, `
 		INSERT INTO monitors (name, url, interval_seconds)
 		VALUES ($1, $2, $3)
 		RETURNING id, name, url, interval_seconds, created_at
 	`, name, url, intervalSeconds)
-	// 3. Scan the returned row into your Monitor struct
+
 	err := row.Scan(
 		&m.ID,
 		&m.Name,
@@ -83,12 +82,40 @@ func (repo *MonitorRepository) Create(
 		&m.CreatedAt,
 	)
 
-	// 4. If scanning fails, return an error
-	// Hint: return monitor.Monitor{}, err
 	if err != nil {
 		return monitor.Monitor{},
 			fmt.Errorf("failed to create monitor: %w", err)
 	}
-	// 5. Return the created Monitor and nil
+
+	return m, nil
+}
+
+func (repo *MonitorRepository) GetByID(ctx context.Context, id int64) (monitor.Monitor, error) {
+
+	var m monitor.Monitor
+
+	err := repo.DB.QueryRow(ctx, `
+	        SELECT
+            id,
+            name,
+            url,
+            interval_seconds,
+            created_at
+			FROM monitors
+			WHERE id = $1
+	`, id).Scan(
+		&m.ID,
+		&m.Name,
+		&m.URL,
+		&m.IntervalSeconds,
+		&m.CreatedAt,
+	)
+
+	if err != nil {
+		return monitor.Monitor{}, fmt.Errorf(
+			"failed to retrieve monitor: %w", err,
+		)
+	}
+
 	return m, nil
 }
