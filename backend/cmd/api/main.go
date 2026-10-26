@@ -3,15 +3,20 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/harimations-git/pulse/backend/internal/database"
 	"github.com/harimations-git/pulse/backend/internal/monitor"
+	"github.com/harimations-git/pulse/backend/internal/scheduler"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -37,11 +42,42 @@ func main() {
 	defer db.Close()
 
 	repo := database.NewMonitorRepository(db)
+	checkRepo := database.NewCheckRepository(db)
+
+	fakeCheck := func(ctx context.Context, m monitor.Monitor) error {
+		fmt.Printf("Scheduler would check: %s (%s)\n", m.Name, m.URL)
+		return nil
+	}
+
+	onTick := func(ctx context.Context) {
+		err := scheduler.RunDueChecks(
+			ctx,
+			repo,
+			checkRepo,
+			2,
+			fakeCheck,
+		)
+
+		if err != nil {
+			fmt.Println("Scheduler error:", err)
+		}
+	}
 
 	fmt.Println("Connected to PostgreSQL successfully!")
 
 	http.HandleFunc("GET /health", healthHandler)
 	http.HandleFunc("POST /monitors/check", checkHandler)
+	http.HandleFunc("GET /monitors/{id}/results",
+		func(w http.ResponseWriter, r *http.Request) {
+			getCheckResultsHandler(w, r, checkRepo)
+		},
+	)
+
+	http.HandleFunc("POST /monitors/{id}/check",
+		func(w http.ResponseWriter, r *http.Request) {
+			checkRegisteredMonitorHandler(w, r, repo, checkRepo)
+		},
+	)
 
 	http.HandleFunc("GET /monitors", func(w http.ResponseWriter, r *http.Request) {
 		getMonitorsHandler(w, r, repo)
@@ -52,6 +88,16 @@ func main() {
 	})
 
 	fmt.Println("Pulse API running on port 8080")
+
+	s := scheduler.NewScheduler(
+		10*time.Second,
+		onTick,
+	)
+
+	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
+	defer stopScheduler()
+
+	go s.Run(schedulerCtx)
 
 	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
@@ -162,25 +208,103 @@ func createMonitorHandler(
 		return
 	}
 
-	// 4. Call repo.Create() using r.Context().
 	created, err := repo.Create(
 		r.Context(),
 		req.Name,
 		req.URL,
 		req.IntervalSeconds,
 	)
-	// 5. Handle database errors.
+
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			http.Error(w, "Monitor URL already exists", http.StatusConflict)
+			return
+		}
+
 		http.Error(w, "Failed to create monitor", http.StatusInternalServerError)
 		return
 	}
-	// Return HTTP 201 Created
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 
-	// Return the created monitor as JSON
 	if err := json.NewEncoder(w).Encode(created); err != nil {
 		fmt.Println("Failed to encode monitor:", err)
+	}
+}
+
+func getCheckResultsHandler(w http.ResponseWriter, r *http.Request, repo *database.CheckRepository) {
+	idString := r.PathValue("id")
+
+	monitorID, err := strconv.ParseInt(idString, 10, 64)
+
+	if err != nil || monitorID <= 0 {
+		http.Error(w, "Invalid monitor ID", http.StatusBadRequest)
+		return
+	}
+
+	records, err := repo.GetByMonitorID(r.Context(), monitorID)
+
+	if err != nil {
+		http.Error(w, "Failed to retrieve monitoring history", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if err := json.NewEncoder(w).Encode(records); err != nil {
+		fmt.Println("Failed to encode check results:", err)
+	}
+
+}
+
+func checkRegisteredMonitorHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+	monitorRepo *database.MonitorRepository,
+	checkRepo *database.CheckRepository,
+) {
+	idString := r.PathValue("id")
+
+	monitorID, err := strconv.ParseInt(idString, 10, 64)
+
+	if err != nil || monitorID <= 0 {
+		http.Error(w, "Invalid monitor ID", http.StatusBadRequest)
+		return
+	}
+
+	registeredMonitor, err := monitorRepo.GetByID(r.Context(), monitorID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		http.Error(w, "Monitor not found", http.StatusNotFound)
+		return
+	}
+
+	if err != nil {
+		http.Error(w, "Failed to retrieve monitor", http.StatusInternalServerError)
+		return
+	}
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	result := monitor.CheckService(registeredMonitor.URL, client)
+
+	saved, err := checkRepo.Save(r.Context(), registeredMonitor.ID, result)
+
+	if err != nil {
+		http.Error(w, "Failed to save check result", http.StatusInternalServerError)
+		return
+	}
+
+	// 6. Return saved record as JSON
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+
+	if err := json.NewEncoder(w).Encode(saved); err != nil {
+		fmt.Println("Failed to encode saved check result:", err)
 	}
 }
 

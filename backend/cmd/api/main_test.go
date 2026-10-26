@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/harimations-git/pulse/backend/internal/database"
+	"github.com/harimations-git/pulse/backend/internal/monitor"
 )
 
 func TestHealthHandler(t *testing.T) {
@@ -166,5 +172,166 @@ func TestCheckHandlerSuccess(t *testing.T) {
 
 	if response.Error != "" {
 		t.Errorf("Expected no error, got %s", response.Error)
+	}
+}
+
+func TestCheckRegisteredMonitorInvalidID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+	}{
+		{"Non-numeric ID", "abc"},
+		{"Negative ID", "-1"},
+		{"Zero ID", "0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/monitors/"+tt.id+"/check",
+				nil,
+			)
+
+			request.SetPathValue("id", tt.id)
+
+			recorder := httptest.NewRecorder()
+
+			checkRegisteredMonitorHandler(
+				recorder,
+				request,
+				nil,
+				nil,
+			)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Errorf(
+					"Expected status 400, got %d",
+					recorder.Code,
+				)
+			}
+		})
+	}
+}
+
+func TestCheckRegisteredMonitorSuccess(t *testing.T) {
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+	defer server.Close()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+
+	ctx := context.Background()
+
+	db, err := database.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal("Failed to connect to test database:", err)
+	}
+	t.Cleanup(db.Close)
+
+	var dbName string
+	if err := db.QueryRow(ctx, "SELECT current_database()").Scan(&dbName); err != nil {
+		t.Fatal(err)
+	}
+
+	if dbName != "pulse_test" {
+		t.Fatalf("Expected pulse_test, got %s", dbName)
+	}
+
+	monitorRepo := database.NewMonitorRepository(db)
+	checkRepo := database.NewCheckRepository(db)
+
+	created, err := monitorRepo.Create(
+		ctx,
+		"API Integration Test",
+		server.URL,
+		60,
+	)
+
+	if err != nil {
+		t.Fatal("Failed to create test monitor:", err)
+	}
+
+	t.Cleanup(func() {
+		_, err := db.Exec(
+			context.Background(),
+			"DELETE FROM monitors WHERE id = $1",
+			created.ID,
+		)
+		if err != nil {
+			t.Errorf("Failed to clean up monitor: %v", err)
+		}
+	})
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		fmt.Sprintf("/monitors/%d/check", created.ID),
+		nil,
+	)
+
+	request.SetPathValue("id", strconv.FormatInt(created.ID, 10))
+
+	recorder := httptest.NewRecorder()
+
+	checkRegisteredMonitorHandler(
+		recorder,
+		request,
+		monitorRepo,
+		checkRepo,
+	)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf(
+			"Expected 201 Created, got %d: %s",
+			recorder.Code,
+			recorder.Body.String(),
+		)
+	}
+
+	var saved monitor.CheckRecord
+
+	if err := json.Unmarshal(recorder.Body.Bytes(), &saved); err != nil {
+		t.Fatal("Failed to decode response:", err)
+	}
+
+	if saved.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", saved.StatusCode)
+	}
+
+	if !saved.Healthy {
+		t.Error("Expected monitor to be healthy")
+	}
+
+	if saved.MonitorID != created.ID {
+		t.Errorf("Expected monitor ID %d, got %d",
+			created.ID, saved.MonitorID)
+	}
+
+	if saved.ErrorMessage != nil {
+		t.Errorf("Expected no error, got %s", *saved.ErrorMessage)
+	}
+
+	records, err := checkRepo.GetByMonitorID(ctx, created.ID)
+
+	if err != nil {
+		t.Fatal("Failed to retrieve saved history:", err)
+	}
+
+	if len(records) != 1 {
+		t.Fatalf("Expected 1 saved check, got %d", len(records))
+	}
+
+	if records[0].ID != saved.ID {
+		t.Errorf(
+			"Expected saved ID %d, got %d",
+			saved.ID,
+			records[0].ID,
+		)
 	}
 }
