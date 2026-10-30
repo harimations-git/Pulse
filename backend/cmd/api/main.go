@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/harimations-git/pulse/backend/internal/database"
@@ -98,23 +100,71 @@ func main() {
 		createMonitorHandler(w, r, repo)
 	})
 
-	fmt.Println("Pulse API running on port 8080")
+	// Create a context that cancels when Pulse receives
+	// Ctrl+C or a termination signal.
+	appCtx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer stop()
 
+	// Start scheduler
 	s := scheduler.NewScheduler(
 		10*time.Second,
 		onTick,
 	)
 
-	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
-	defer stopScheduler()
+	schedulerDone := make(chan struct{})
 
-	go s.Run(schedulerCtx)
+	go func() {
+		defer close(schedulerDone)
+		s.Run(appCtx)
+	}()
 
-	err = http.ListenAndServe("127.0.0.1:8080", nil)
-	if err != nil {
-		fmt.Println("Server error:", err)
+	// Create HTTP server
+	server := &http.Server{
+		Addr:    "127.0.0.1:8080",
+		Handler: http.DefaultServeMux,
 	}
 
+	serverErrors := make(chan error, 1)
+
+	go func() {
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	fmt.Println("Pulse API running on port 8080")
+
+	// Wait for a shutdown signal or server failure
+	select {
+	case <-appCtx.Done():
+		fmt.Println("Shutdown signal received")
+
+	case err := <-serverErrors:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Println("Server error:", err)
+		}
+	}
+
+	// Cancel scheduled monitoring
+	stop()
+
+	// Give active HTTP requests up to 10 seconds to finish
+	shutdownCtx, cancelShutdown := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancelShutdown()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		fmt.Println("HTTP shutdown error:", err)
+	}
+
+	// Wait until the scheduler has exited
+	<-schedulerDone
+
+	fmt.Println("Pulse shutdown complete")
 }
 
 func checkHandler(w http.ResponseWriter, r *http.Request, client *http.Client) {
