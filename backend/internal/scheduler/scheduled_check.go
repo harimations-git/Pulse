@@ -19,7 +19,7 @@ func NewScheduledCheck(
 			return err
 		}
 
-		result := monitor.CheckService(m.URL, client)
+		result := monitor.CheckService(ctx, m.URL, client)
 
 		saved, err := checkRepo.Save(ctx, m.ID, result)
 		if err != nil {

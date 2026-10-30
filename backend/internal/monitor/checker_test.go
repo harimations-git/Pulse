@@ -34,7 +34,7 @@ func TestCheckServiceStatucCodes(t *testing.T) {
 
 			defer server.Close()
 
-			result := CheckService(server.URL, client)
+			result := CheckService(context.Background(), server.URL, client)
 
 			if result.Healthy != tc.wantHealthy {
 				t.Errorf("Expected healthy %t, got %t", tc.wantHealthy, result.Healthy)
@@ -57,7 +57,7 @@ func TestCheckServiceHealthy(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	result := CheckService(server.URL, client)
+	result := CheckService(context.Background(), server.URL, client)
 
 	if !result.Healthy {
 		t.Error("Exepcted service to be healthy")
@@ -79,7 +79,7 @@ func TestCheckServiceUnhealthy(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	result := CheckService(server.URL, client)
+	result := CheckService(context.Background(), server.URL, client)
 
 	if result.Healthy {
 		t.Error("Exepected service to be unhealthy")
@@ -103,7 +103,7 @@ func TestServerTimeout(t *testing.T) {
 
 	client := &http.Client{Timeout: 100 * time.Millisecond}
 
-	result := CheckService(server.URL, client)
+	result := CheckService(context.Background(), server.URL, client)
 
 	if result.Healthy {
 		t.Error("Exepected service to be unhealthy")
@@ -121,4 +121,30 @@ func TestServerTimeout(t *testing.T) {
 		t.Errorf("Expected deadline exceeded error, got %v", result.Err)
 	}
 
+}
+
+func TestCheckServiceCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	result := CheckService(ctx, "https://example.com", client)
+
+	if result.Healthy {
+		t.Error("Expected cancelled request to be unhealthy")
+	}
+
+	if result.StatusCode != 0 {
+		t.Errorf("Expected status 0, got %d", result.StatusCode)
+	}
+
+	if !errors.Is(result.Err, context.Canceled) {
+		t.Errorf(
+			"Expected context.Canceled, got %v",
+			result.Err,
+		)
+	}
 }

@@ -1,19 +1,37 @@
 package monitor
 
 import (
-	"fmt"
+	"context"
 	"net/http"
 	"time"
 )
 
-func CheckService(url string, client *http.Client) CheckResult {
+func CheckService(ctx context.Context, url string, client *http.Client) CheckResult {
 
 	start := time.Now()
-	res, err := client.Get(url)
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		url,
+		nil,
+	)
+
+	if err != nil {
+		return CheckResult{
+			URL:          url,
+			StatusCode:   0,
+			ResponseTime: time.Since(start),
+			Healthy:      false,
+			Err:          err,
+		}
+	}
+
+	res, err := client.Do(req)
+
 	resTime := time.Since(start)
 
 	if err != nil {
-		fmt.Println("Something went wrong: ", err)
 		return CheckResult{
 			URL:          url,
 			StatusCode:   0,
