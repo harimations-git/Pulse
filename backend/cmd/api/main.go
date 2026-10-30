@@ -129,7 +129,7 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	result := monitor.CheckService(req.URL, client)
+	result := monitor.CheckService(r.Context(), req.URL, client)
 
 	response := CheckResponse{
 		URL:            result.URL,
@@ -290,7 +290,7 @@ func checkRegisteredMonitorHandler(
 		Timeout: 5 * time.Second,
 	}
 
-	result := monitor.CheckService(registeredMonitor.URL, client)
+	result := monitor.CheckService(r.Context(), registeredMonitor.URL, client)
 
 	saved, err := checkRepo.Save(r.Context(), registeredMonitor.ID, result)
 
