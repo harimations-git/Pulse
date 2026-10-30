@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+type validatingTransport struct {
+	base http.RoundTripper
+}
+
+type LookupIPFunc func(
+	ctx context.Context,
+	hostname string,
+) ([]net.IPAddr, error)
+
 func ValidateTargetURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 
@@ -29,6 +38,18 @@ func ValidateTargetURL(rawURL string) error {
 		return fmt.Errorf("UTL must contain a hostname")
 	}
 
+	port := parsed.Port()
+
+	if port != "" {
+		if parsed.Scheme == "http" && port != "80" {
+			return fmt.Errorf("HTTP only supports port 80")
+		}
+
+		if parsed.Scheme == "https" && port != "443" {
+			return fmt.Errorf("HTTPS only supports port 443")
+		}
+	}
+
 	//Prevent URLs containing embedded credentials
 	if parsed.User != nil {
 		return fmt.Errorf("URL credentials are not allowed")
@@ -40,8 +61,8 @@ func ValidateTargetURL(rawURL string) error {
 	}
 
 	// Block explicitly supplied non-public IP addresses
-	if ip := net.ParseIP(hostname); ip != nil {
-		if !ip.IsGlobalUnicast() || ip.IsPrivate() {
+	if ip, err := netip.ParseAddr(hostname); err == nil {
+		if !isAllowedIP(ip) {
 			return fmt.Errorf("non-public IP addresses are not allowed")
 		}
 	}
@@ -50,7 +71,16 @@ func ValidateTargetURL(rawURL string) error {
 }
 
 func isAllowedIP(ip netip.Addr) bool {
+
 	ip = ip.Unmap()
+
+	if ip.Is6() {
+		globalIPv6 := netip.MustParsePrefix("2000::/3")
+
+		if !globalIPv6.Contains(ip) {
+			return false
+		}
+	}
 
 	if !ip.IsValid() ||
 		!ip.IsGlobalUnicast() ||
@@ -84,6 +114,13 @@ func isAllowedIP(ip netip.Addr) bool {
 }
 
 func NewSafeHTTPClient() *http.Client {
+	return newSafeHTTPClientWithResolver(
+		net.DefaultResolver.LookupIPAddr,
+	)
+}
+
+func newSafeHTTPClientWithResolver(lookup LookupIPFunc) *http.Client {
+
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
 	}
@@ -100,7 +137,7 @@ func NewSafeHTTPClient() *http.Client {
 			}
 
 			//Resolve DNS
-			addresses, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
+			addresses, err := lookup(ctx, hostname)
 			if err != nil {
 				return nil, err
 			}
@@ -130,10 +167,18 @@ func NewSafeHTTPClient() *http.Client {
 
 	return &http.Client{
 		Timeout:   5 * time.Second,
-		Transport: transport,
+		Transport: &validatingTransport{base: transport},
 
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+func (v *validatingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := ValidateTargetURL(req.URL.String()); err != nil {
+		return nil, fmt.Errorf("unsafe target URL: %w", err)
+	}
+
+	return v.base.RoundTrip(req)
 }

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,14 @@ import (
 	"github.com/harimations-git/pulse/backend/internal/database"
 	"github.com/harimations-git/pulse/backend/internal/monitor"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(
+	r *http.Request,
+) (*http.Response, error) {
+	return f(r)
+}
 
 func TestHealthHandler(t *testing.T) {
 
@@ -65,7 +75,7 @@ func TestCheckHandlerEmptyURL(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 
-	checkHandler(recorder, req)
+	checkHandler(recorder, req, nil)
 
 	if recorder.Code != 400 {
 		t.Errorf(
@@ -94,7 +104,7 @@ func TestCheckHandlerInvalidJSON(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 
-	checkHandler(recorder, req)
+	checkHandler(recorder, req, nil)
 
 	if recorder.Code != 400 {
 		t.Errorf(
@@ -113,52 +123,62 @@ func TestCheckHandlerInvalidJSON(t *testing.T) {
 
 func TestCheckHandlerSuccess(t *testing.T) {
 
-	// Create a mock server that returns HTTP 200
-	server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		}),
-	)
-	defer server.Close()
+	testURL := "https://example.com"
 
-	// Create JSON request containing the mock server URL
-	body := fmt.Sprintf(`{"url":"%s"}`, server.URL)
+	// Create a fake HTTP client that returns 200
+	client := &http.Client{
+		Transport: roundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("")),
+					Request:    req,
+				}, nil
+			},
+		),
+	}
 
-	req := httptest.NewRequest(
+	// Create JSON request with a valid URL
+	body := fmt.Sprintf(`{"url":"%s"}`, testURL)
+
+	request := httptest.NewRequest(
 		http.MethodPost,
 		"/monitors/check",
 		strings.NewReader(body),
 	)
 
-	// Capture the API response
 	recorder := httptest.NewRecorder()
 
-	// Call our monitoring API handler
-	checkHandler(recorder, req)
+	// Execute the API handler
+	checkHandler(recorder, request, client)
 
-	// Verify HTTP status
+	// Verify HTTP response
 	if recorder.Code != http.StatusOK {
-		t.Errorf(
-			"Expected status 200, got %d",
+		t.Fatalf(
+			"Expected status 200, got %d: %s",
 			recorder.Code,
+			recorder.Body.String(),
 		)
 	}
 
-	// Decode the JSON response
+	// Decode JSON response
 	var response CheckResponse
 
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal("Failed to decode response:", err)
 	}
 
-	if response.URL != server.URL {
+	// Verify URL
+	if response.URL != testURL {
 		t.Errorf(
 			"Expected URL %s, got %s",
-			server.URL,
+			testURL,
 			response.URL,
 		)
 	}
 
+	// Verify status code
 	if response.StatusCode != http.StatusOK {
 		t.Errorf(
 			"Expected status 200, got %d",
@@ -166,10 +186,12 @@ func TestCheckHandlerSuccess(t *testing.T) {
 		)
 	}
 
+	// Verify healthy result
 	if !response.Healthy {
 		t.Error("Expected service to be healthy")
 	}
 
+	// Verify no error
 	if response.Error != "" {
 		t.Errorf("Expected no error, got %s", response.Error)
 	}
@@ -200,6 +222,7 @@ func TestCheckRegisteredMonitorInvalidID(t *testing.T) {
 			checkRegisteredMonitorHandler(
 				recorder,
 				request,
+				nil,
 				nil,
 				nil,
 			)
@@ -284,6 +307,7 @@ func TestCheckRegisteredMonitorSuccess(t *testing.T) {
 		request,
 		monitorRepo,
 		checkRepo,
+		server.Client(),
 	)
 
 	if recorder.Code != http.StatusCreated {
@@ -333,5 +357,76 @@ func TestCheckRegisteredMonitorSuccess(t *testing.T) {
 			saved.ID,
 			records[0].ID,
 		)
+	}
+}
+
+func TestAPIRejectsUnsafeURLs(t *testing.T) {
+	unsafeURLs := []string{
+		"http://localhost:8080",
+		"http://127.0.0.1",
+		"http://192.168.1.1",
+		"http://169.254.169.254",
+		"https://example.com:5432",
+	}
+
+	for _, targetURL := range unsafeURLs {
+		t.Run(targetURL, func(t *testing.T) {
+
+			// Test the direct URL checking endpoint
+			checkBody, err := json.Marshal(CheckRequest{
+				URL: targetURL,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			checkRequest := httptest.NewRequest(
+				http.MethodPost,
+				"/monitors/check",
+				bytes.NewReader(checkBody),
+			)
+
+			checkRecorder := httptest.NewRecorder()
+
+			checkHandler(checkRecorder, checkRequest, nil)
+
+			if checkRecorder.Code != http.StatusBadRequest {
+				t.Errorf(
+					"Expected check endpoint to return 400, got %d",
+					checkRecorder.Code,
+				)
+			}
+
+			// Test the monitor registration endpoint
+			createBody, err := json.Marshal(CreateMonitorRequest{
+				Name:            "Unsafe Monitor",
+				URL:             targetURL,
+				IntervalSeconds: 60,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			createRequest := httptest.NewRequest(
+				http.MethodPost,
+				"/monitors",
+				bytes.NewReader(createBody),
+			)
+
+			createRecorder := httptest.NewRecorder()
+
+			createMonitorHandler(
+				createRecorder,
+				createRequest,
+				nil,
+			)
+
+			if createRecorder.Code != http.StatusBadRequest {
+				t.Errorf(
+					"Expected create endpoint to return 400, got %d",
+					createRecorder.Code,
+				)
+			}
+		})
 	}
 }
