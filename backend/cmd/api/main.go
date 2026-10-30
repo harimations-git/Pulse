@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -44,10 +43,12 @@ func main() {
 	repo := database.NewMonitorRepository(db)
 	checkRepo := database.NewCheckRepository(db)
 
-	fakeCheck := func(ctx context.Context, m monitor.Monitor) error {
-		fmt.Printf("Scheduler would check: %s (%s)\n", m.Name, m.URL)
-		return nil
-	}
+	client := monitor.NewSafeHTTPClient()
+
+	realCheck := scheduler.NewScheduledCheck(
+		checkRepo,
+		client,
+	)
 
 	onTick := func(ctx context.Context) {
 		err := scheduler.RunDueChecks(
@@ -55,7 +56,7 @@ func main() {
 			repo,
 			checkRepo,
 			2,
-			fakeCheck,
+			realCheck,
 		)
 
 		if err != nil {
@@ -66,7 +67,11 @@ func main() {
 	fmt.Println("Connected to PostgreSQL successfully!")
 
 	http.HandleFunc("GET /health", healthHandler)
-	http.HandleFunc("POST /monitors/check", checkHandler)
+	http.HandleFunc("POST /monitors/check",
+		func(w http.ResponseWriter, r *http.Request) {
+			checkHandler(w, r, client)
+		},
+	)
 	http.HandleFunc("GET /monitors/{id}/results",
 		func(w http.ResponseWriter, r *http.Request) {
 			getCheckResultsHandler(w, r, checkRepo)
@@ -75,7 +80,13 @@ func main() {
 
 	http.HandleFunc("POST /monitors/{id}/check",
 		func(w http.ResponseWriter, r *http.Request) {
-			checkRegisteredMonitorHandler(w, r, repo, checkRepo)
+			checkRegisteredMonitorHandler(
+				w,
+				r,
+				repo,
+				checkRepo,
+				client,
+			)
 		},
 	)
 
@@ -99,14 +110,14 @@ func main() {
 
 	go s.Run(schedulerCtx)
 
-	err = http.ListenAndServe(":8080", nil)
+	err = http.ListenAndServe("127.0.0.1:8080", nil)
 	if err != nil {
 		fmt.Println("Server error:", err)
 	}
 
 }
 
-func checkHandler(w http.ResponseWriter, r *http.Request) {
+func checkHandler(w http.ResponseWriter, r *http.Request, client *http.Client) {
 	var req CheckRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -119,15 +130,10 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parsedURL, err := url.Parse(req.URL)
-	if err != nil ||
-		(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
-		parsedURL.Hostname() == "" {
-		http.Error(w, "Invalid URL", http.StatusBadRequest)
+	if err := monitor.ValidateTargetURL(req.URL); err != nil {
+		http.Error(w, "Invalid URL: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
 
 	result := monitor.CheckService(r.Context(), req.URL, client)
 
@@ -193,13 +199,8 @@ func createMonitorHandler(
 		return
 	}
 
-	parsedURL, err := url.Parse(req.URL)
-
-	if err != nil ||
-		(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
-		parsedURL.Hostname() == "" ||
-		parsedURL.User != nil {
-		http.Error(w, "Invalid URL", http.StatusBadRequest)
+	if err := monitor.ValidateTargetURL(req.URL); err != nil {
+		http.Error(w, "Invalid URL: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -264,6 +265,7 @@ func checkRegisteredMonitorHandler(
 	r *http.Request,
 	monitorRepo *database.MonitorRepository,
 	checkRepo *database.CheckRepository,
+	client *http.Client,
 ) {
 	idString := r.PathValue("id")
 
@@ -284,10 +286,6 @@ func checkRegisteredMonitorHandler(
 	if err != nil {
 		http.Error(w, "Failed to retrieve monitor", http.StatusInternalServerError)
 		return
-	}
-
-	client := &http.Client{
-		Timeout: 5 * time.Second,
 	}
 
 	result := monitor.CheckService(r.Context(), registeredMonitor.URL, client)
