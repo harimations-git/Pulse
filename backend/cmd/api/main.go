@@ -46,11 +46,22 @@ func main() {
 	checkRepo := database.NewCheckRepository(db)
 
 	client := monitor.NewSafeHTTPClient()
+	guard := monitor.NewCheckGuard()
 
 	realCheck := scheduler.NewScheduledCheck(
 		checkRepo,
 		client,
 	)
+
+	guardedCheck := func(ctx context.Context, m monitor.Monitor) error {
+		if !guard.TryAcquire(m.ID) {
+			return nil
+		}
+
+		defer guard.Release(m.ID)
+
+		return realCheck(ctx, m)
+	}
 
 	onTick := func(ctx context.Context) {
 		err := scheduler.RunDueChecks(
@@ -58,7 +69,7 @@ func main() {
 			repo,
 			checkRepo,
 			2,
-			realCheck,
+			guardedCheck,
 		)
 
 		if err != nil {
@@ -88,6 +99,7 @@ func main() {
 				repo,
 				checkRepo,
 				client,
+				guard,
 			)
 		},
 	)
@@ -99,6 +111,17 @@ func main() {
 	http.HandleFunc("POST /monitors", func(w http.ResponseWriter, r *http.Request) {
 		createMonitorHandler(w, r, repo)
 	})
+
+	http.HandleFunc("GET /monitors/{id}/stats",
+		func(w http.ResponseWriter, r *http.Request) {
+			getMonitorStatsHandler(
+				w,
+				r,
+				repo,
+				checkRepo,
+			)
+		},
+	)
 
 	// Create a context that cancels when Pulse receives
 	// Ctrl+C or a termination signal.
@@ -316,6 +339,7 @@ func checkRegisteredMonitorHandler(
 	monitorRepo *database.MonitorRepository,
 	checkRepo *database.CheckRepository,
 	client *http.Client,
+	guard *monitor.CheckGuard,
 ) {
 	idString := r.PathValue("id")
 
@@ -338,6 +362,17 @@ func checkRegisteredMonitorHandler(
 		return
 	}
 
+	if !guard.TryAcquire(registeredMonitor.ID) {
+		http.Error(
+			w,
+			"Monitor is already being checked",
+			http.StatusConflict,
+		)
+		return
+	}
+
+	defer guard.Release(registeredMonitor.ID)
+
 	result := monitor.CheckService(r.Context(), registeredMonitor.URL, client)
 
 	saved, err := checkRepo.Save(r.Context(), registeredMonitor.ID, result)
@@ -354,6 +389,63 @@ func checkRegisteredMonitorHandler(
 	if err := json.NewEncoder(w).Encode(saved); err != nil {
 		fmt.Println("Failed to encode saved check result:", err)
 	}
+}
+
+func getMonitorStatsHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+	monitorRepo *database.MonitorRepository,
+	checkRepo *database.CheckRepository,
+) {
+	idString := r.PathValue("id")
+
+	monitorID, err := strconv.ParseInt(idString, 10, 64)
+
+	if err != nil || monitorID <= 0 {
+		http.Error(w, "Invalid monitor ID", http.StatusBadRequest)
+		return
+	}
+
+	_, err = monitorRepo.GetByID(r.Context(), monitorID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		http.Error(
+			w,
+			"Monitor not found",
+			http.StatusNotFound,
+		)
+		return
+	}
+
+	if err != nil {
+		http.Error(
+			w,
+			"Failed to retrieve monitor",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	stats, err := checkRepo.GetStatsByMonitorID(
+		r.Context(),
+		monitorID,
+	)
+
+	if err != nil {
+		http.Error(
+			w,
+			"Failed to retrieve statistics",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if err := json.NewEncoder(w).Encode(stats); err != nil {
+		fmt.Println("Failed to encode statistics:", err)
+	}
+
 }
 
 type CheckResponse struct {

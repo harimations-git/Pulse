@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/harimations-git/pulse/backend/internal/database"
 	"github.com/harimations-git/pulse/backend/internal/monitor"
@@ -225,6 +227,7 @@ func TestCheckRegisteredMonitorInvalidID(t *testing.T) {
 				nil,
 				nil,
 				nil,
+				nil,
 			)
 
 			if recorder.Code != http.StatusBadRequest {
@@ -308,6 +311,7 @@ func TestCheckRegisteredMonitorSuccess(t *testing.T) {
 		monitorRepo,
 		checkRepo,
 		server.Client(),
+		monitor.NewCheckGuard(),
 	)
 
 	if recorder.Code != http.StatusCreated {
@@ -429,4 +433,358 @@ func TestAPIRejectsUnsafeURLs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckRegisteredMonitorConflict(t *testing.T) {
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	db, err := database.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal("Failed to connect to test database:", err)
+	}
+	t.Cleanup(func() {
+		db.Close()
+	})
+
+	var databaseName string
+
+	err = db.QueryRow(
+		ctx,
+		"SELECT current_database()",
+	).Scan(&databaseName)
+
+	if err != nil {
+		t.Fatal("Failed to verify database:", err)
+	}
+
+	if databaseName != "pulse_test" {
+		t.Fatalf(
+			"Expected pulse_test database, got %s",
+			databaseName,
+		)
+	}
+
+	monitorRepo := database.NewMonitorRepository(db)
+	checkRepo := database.NewCheckRepository(db)
+
+	testURL := fmt.Sprintf(
+		"https://pulse-conflict-%d.example.com",
+		time.Now().UnixNano(),
+	)
+
+	createdMonitor, err := monitorRepo.Create(
+		ctx,
+		"Conflict Test Monitor",
+		testURL,
+		60,
+	)
+
+	if err != nil {
+		t.Fatal("Failed to create test monitor:", err)
+	}
+
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cleanupCancel()
+
+		_, err := db.Exec(
+			cleanupCtx,
+			"DELETE FROM monitors WHERE id = $1",
+			createdMonitor.ID,
+		)
+
+		if err != nil {
+			t.Errorf("Failed to clean up monitor: %v", err)
+		}
+	})
+
+	guard := monitor.NewCheckGuard()
+
+	if !guard.TryAcquire(createdMonitor.ID) {
+		t.Fatal("Expected to acquire monitor")
+	}
+	defer guard.Release(createdMonitor.ID)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		fmt.Sprintf("/monitors/%d/check", createdMonitor.ID),
+		nil,
+	)
+
+	request.SetPathValue(
+		"id",
+		strconv.FormatInt(createdMonitor.ID, 10),
+	)
+
+	recorder := httptest.NewRecorder()
+
+	checkRegisteredMonitorHandler(
+		recorder,
+		request,
+		monitorRepo,
+		checkRepo,
+		nil,
+		guard,
+	)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf(
+			"Expected 409 Conflict, got %d: %s",
+			recorder.Code,
+			recorder.Body.String(),
+		)
+	}
+
+	records, err := checkRepo.GetByMonitorID(
+		ctx,
+		createdMonitor.ID,
+	)
+
+	if err != nil {
+		t.Fatal("Failed to retrieve check records:", err)
+	}
+
+	if len(records) != 0 {
+		t.Errorf(
+			"Expected no saved checks, got %d",
+			len(records),
+		)
+	}
+}
+
+func TestGetMonitorStatsInvalidID(t *testing.T) {
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/monitors/invalid/stats",
+		nil,
+	)
+
+	request.SetPathValue("id", "invalid")
+
+	recorder := httptest.NewRecorder()
+
+	getMonitorStatsHandler(
+		recorder,
+		request,
+		nil,
+		nil,
+	)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Errorf(
+			"Expected 400 Bad Request, got %d",
+			recorder.Code,
+		)
+	}
+}
+
+func TestGetMonitorStatsHandler(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	db, err := database.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Register pool cleanup first so it runs last.
+	t.Cleanup(db.Close)
+
+	// Verify the database is safe to use for tests.
+	var databaseName string
+	err = db.QueryRow(
+		ctx,
+		"SELECT current_database()",
+	).Scan(&databaseName)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if databaseName != "pulse_test" {
+		t.Fatalf(
+			"Expected pulse_test, got %s",
+			databaseName,
+		)
+	}
+
+	monitorRepo := database.NewMonitorRepository(db)
+	checkRepo := database.NewCheckRepository(db)
+
+	t.Run("Monitor not found", func(t *testing.T) {
+		// Use a valid but extremely unlikely monitor ID.
+		id := "9223372036854775807"
+
+		request := httptest.NewRequest(
+			http.MethodGet,
+			"/monitors/"+id+"/stats",
+			nil,
+		)
+		request.SetPathValue("id", id)
+
+		recorder := httptest.NewRecorder()
+
+		getMonitorStatsHandler(
+			recorder,
+			request,
+			monitorRepo,
+			checkRepo,
+		)
+
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf(
+				"Expected 404, got %d: %s",
+				recorder.Code,
+				recorder.Body.String(),
+			)
+		}
+	})
+
+	t.Run("Returns statistics", func(t *testing.T) {
+		testURL := fmt.Sprintf(
+			"https://example.com/stats-%d",
+			time.Now().UnixNano(),
+		)
+
+		created, err := monitorRepo.Create(
+			ctx,
+			"Statistics API Test",
+			testURL,
+			60,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Cleanup(func() {
+			cleanupCtx, cleanupCancel := context.WithTimeout(
+				context.Background(),
+				5*time.Second,
+			)
+			defer cleanupCancel()
+
+			_, err := db.Exec(
+				cleanupCtx,
+				"DELETE FROM monitors WHERE id = $1",
+				created.ID,
+			)
+
+			if err != nil {
+				t.Errorf("Cleanup failed: %v", err)
+			}
+		})
+
+		// Save one successful and one failed check.
+		checks := []monitor.CheckResult{
+			{
+				URL:          testURL,
+				StatusCode:   200,
+				ResponseTime: 100 * time.Millisecond,
+				Healthy:      true,
+			},
+			{
+				URL:          testURL,
+				StatusCode:   503,
+				ResponseTime: 300 * time.Millisecond,
+				Healthy:      false,
+			},
+		}
+
+		for _, result := range checks {
+			if _, err := checkRepo.Save(
+				ctx,
+				created.ID,
+				result,
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		request := httptest.NewRequest(
+			http.MethodGet,
+			fmt.Sprintf("/monitors/%d/stats", created.ID),
+			nil,
+		)
+
+		request.SetPathValue(
+			"id",
+			strconv.FormatInt(created.ID, 10),
+		)
+
+		recorder := httptest.NewRecorder()
+
+		getMonitorStatsHandler(
+			recorder,
+			request,
+			monitorRepo,
+			checkRepo,
+		)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf(
+				"Expected 200, got %d: %s",
+				recorder.Code,
+				recorder.Body.String(),
+			)
+		}
+
+		var stats monitor.Stats
+
+		if err := json.NewDecoder(recorder.Body).Decode(&stats); err != nil {
+			t.Fatal(err)
+		}
+
+		if stats.MonitorID != created.ID {
+			t.Errorf("Incorrect monitor ID: %d", stats.MonitorID)
+		}
+
+		if stats.TotalChecks != 2 {
+			t.Errorf("Expected 2 checks, got %d", stats.TotalChecks)
+		}
+
+		if stats.SuccessfulChecks != 1 {
+			t.Errorf(
+				"Expected 1 successful check, got %d",
+				stats.SuccessfulChecks,
+			)
+		}
+
+		if stats.UptimePercentage != 50 {
+			t.Errorf(
+				"Expected 50%% uptime, got %.2f%%",
+				stats.UptimePercentage,
+			)
+		}
+
+		if math.Abs(stats.AverageResponseTimeMs-200) > 0.001 {
+			t.Errorf(
+				"Expected 200ms average, got %.2fms",
+				stats.AverageResponseTimeMs,
+			)
+		}
+	})
 }
