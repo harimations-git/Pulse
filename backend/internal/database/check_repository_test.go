@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -476,4 +477,141 @@ func TestCheckRepositoryGetLastChecked(t *testing.T) {
 			*lastChecked,
 		)
 	}
+}
+
+func TestGetStatsByMonitorID(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	db, err := Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal("Failed to connect to test database:", err)
+	}
+	t.Cleanup(db.Close)
+
+	var databaseName string
+	err = db.QueryRow(
+		ctx,
+		"SELECT current_database()",
+	).Scan(&databaseName)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if databaseName != "pulse_test" {
+		t.Fatalf("Expected pulse_test, got %s", databaseName)
+	}
+
+	monitorRepo := NewMonitorRepository(db)
+	checkRepo := NewCheckRepository(db)
+
+	testURL := fmt.Sprintf(
+		"https://pulse-stats-%d.example.com",
+		time.Now().UnixNano(),
+	)
+
+	created, err := monitorRepo.Create(
+		ctx,
+		"Statistics Test",
+		testURL,
+		60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cleanupCancel()
+
+		_, err := db.Exec(
+			cleanupCtx,
+			"DELETE FROM monitors WHERE id = $1",
+			created.ID,
+		)
+
+		if err != nil {
+			t.Errorf("Cleanup failed: %v", err)
+		}
+	})
+
+	t.Run("No checks", func(t *testing.T) {
+		stats, err := checkRepo.GetStatsByMonitorID(
+			ctx,
+			created.ID,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if stats.TotalChecks != 0 ||
+			stats.SuccessfulChecks != 0 ||
+			stats.UptimePercentage != 0 ||
+			stats.AverageResponseTimeMs != 0 {
+			t.Errorf("Expected zero statistics, got %+v", stats)
+		}
+	})
+
+	checks := []monitor.CheckResult{
+		{URL: testURL, StatusCode: 200, ResponseTime: 100 * time.Millisecond, Healthy: true},
+		{URL: testURL, StatusCode: 200, ResponseTime: 150 * time.Millisecond, Healthy: true},
+		{URL: testURL, StatusCode: 503, ResponseTime: 300 * time.Millisecond, Healthy: false},
+		{URL: testURL, StatusCode: 200, ResponseTime: 200 * time.Millisecond, Healthy: true},
+		{URL: testURL, StatusCode: 200, ResponseTime: 250 * time.Millisecond, Healthy: true},
+	}
+
+	for _, check := range checks {
+		if _, err := checkRepo.Save(
+			ctx,
+			created.ID,
+			check,
+		); err != nil {
+			t.Fatal("Failed to save check:", err)
+		}
+	}
+	t.Run("Five checks", func(t *testing.T) {
+		stats, err := checkRepo.GetStatsByMonitorID(
+			ctx,
+			created.ID,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if stats.MonitorID != created.ID {
+			t.Errorf("Incorrect monitor ID: %d", stats.MonitorID)
+		}
+
+		if stats.TotalChecks != 5 {
+			t.Errorf("Expected 5 checks, got %d", stats.TotalChecks)
+		}
+
+		if stats.SuccessfulChecks != 4 {
+			t.Errorf("Expected 4 successful checks, got %d",
+				stats.SuccessfulChecks)
+		}
+
+		if stats.UptimePercentage != 80 {
+			t.Errorf("Expected 80%% uptime, got %.2f%%",
+				stats.UptimePercentage)
+		}
+
+		if math.Abs(stats.AverageResponseTimeMs-200) > 0.001 {
+			t.Errorf("Expected 200ms average, got %.2fms",
+				stats.AverageResponseTimeMs)
+		}
+	})
 }

@@ -153,3 +153,45 @@ func (repo *CheckRepository) GetLastChecked(
 
 	return lastChecked, nil
 }
+
+func (r *CheckRepository) GetStatsByMonitorID(
+	ctx context.Context,
+	monitorID int64,
+) (monitor.Stats, error) {
+	stats := monitor.Stats{
+		MonitorID: monitorID,
+	}
+
+	query := `
+        SELECT
+            COUNT(*),
+            COUNT(*) FILTER (WHERE healthy),
+            COALESCE(AVG(response_time_ms), 0)::double precision
+        FROM check_results
+        WHERE monitor_id = $1
+    `
+
+	err := r.DB.QueryRow(
+		ctx,
+		query,
+		monitorID,
+	).Scan(
+		&stats.TotalChecks,
+		&stats.SuccessfulChecks,
+		&stats.AverageResponseTimeMs,
+	)
+
+	if err != nil {
+		return monitor.Stats{}, err
+	}
+
+	// Avoid dividing by zero when a monitor
+	// has no recorded checks.
+	if stats.TotalChecks > 0 {
+		stats.UptimePercentage =
+			float64(stats.SuccessfulChecks) /
+				float64(stats.TotalChecks) * 100
+	}
+
+	return stats, nil
+}

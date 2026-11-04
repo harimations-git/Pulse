@@ -1,0 +1,49 @@
+
+import type { CheckRecord } from "../types/checkRecord";
+import type { Monitor, MonitorStats } from "../types/monitor";
+
+export async function getMonitors(): Promise<Monitor[]> {
+  const response = await fetch("/api/monitors");
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch monitors");
+  }
+
+  const data: Monitor[] | null = await response.json();
+
+  return data ?? [];
+}
+
+export async function getMonitorStats(
+  monitorId: number,
+  signal?: AbortSignal
+): Promise<MonitorStats> {
+  const response = await fetch(
+    `/api/monitors/${monitorId}/stats`,
+    { signal }
+  );
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch monitor statistics");
+  }
+
+  return response.json();
+}
+
+export async function getMonitorHistory(
+  monitorId: number,
+  signal?: AbortSignal
+): Promise<CheckRecord[]> {
+  const response = await fetch(
+    `/api/monitors/${monitorId}/results`,
+    { signal }
+  );
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch monitoring history");
+  }
+
+  const data: CheckRecord[] | null = await response.json();
+
+  return data ?? [];
+}
