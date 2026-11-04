@@ -4,13 +4,19 @@ import { getMonitorHistory, getMonitorStats } from "../api/monitors";
 import type { Monitor, MonitorStats } from "../types/monitor";
 import ResponseTimeChart from "./ResponseTimeChart";
 import type { CheckRecord } from "../types/checkRecord";
+import type { MonitorSnapshot } from "../types/monitorSnapshot";
 
 type MonitorCardProps = {
   monitor: Monitor;
+  onSnapshot: (
+    monitorId: number,
+    snapshot: MonitorSnapshot | null
+  ) => void;
 };
 
 export default function MonitorCard({
   monitor,
+  onSnapshot,
 }: MonitorCardProps) {
   const [stats, setStats] = useState<MonitorStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -43,6 +49,11 @@ export default function MonitorCard({
           setStats(newStats);
           setHistory(newHistory);
           setError(null);
+
+          onSnapshot(monitor.id, {
+            stats: newStats,
+            latestCheck: newHistory[0] ?? null,
+          });
         }
       } catch (err) {
         if (!controller.signal.aborted) {
@@ -51,6 +62,8 @@ export default function MonitorCard({
               ? err.message
               : "Failed to refresh monitor"
           );
+
+          onSnapshot(monitor.id, null);
         }
       } finally {
         fetching = false;
@@ -73,7 +86,7 @@ export default function MonitorCard({
       window.clearInterval(interval);
       controller.abort();
     };
-  }, [monitor.id]);
+  }, [monitor.id, onSnapshot]);
 
   return (
     <article className="rounded-xl border border-slate-800 bg-slate-900 p-6">
@@ -84,10 +97,10 @@ export default function MonitorCard({
 
         <span
           className={`rounded-full px-3 py-1 text-xs font-medium ${!latestCheck
-              ? "bg-slate-700 text-slate-300"
-              : latestCheck.healthy
-                ? "bg-emerald-500/15 text-emerald-400"
-                : "bg-red-500/15 text-red-400"
+            ? "bg-slate-700 text-slate-300"
+            : latestCheck.healthy
+              ? "bg-emerald-500/15 text-emerald-400"
+              : "bg-red-500/15 text-red-400"
             }`}
         >
           {status}

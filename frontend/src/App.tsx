@@ -1,14 +1,30 @@
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getMonitors } from "./api/monitors";
 import type { Monitor } from "./types/monitor";
 import MonitorCard from "./components/MonitorCard";
 import AddMonitorForm from "./components/AddMonitorForm";
+import type { MonitorSnapshot } from "./types/monitorSnapshot";
+import DashboardSummary from "./components/DashboardSummary";
 
 function App() {
   const [monitors, setMonitors] = useState<Monitor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [snapshots, setSnapshots] = useState<
+    Record<number, MonitorSnapshot | null>
+  >({});
+
+  const handleSnapshot = useCallback(
+    (monitorId: number, snapshot: MonitorSnapshot | null) => {
+      setSnapshots((current) => ({
+        ...current,
+        [monitorId]: snapshot,
+      }));
+    },
+    []
+  );
 
   useEffect(() => {
     getMonitors()
@@ -51,6 +67,11 @@ function App() {
             No monitors registered yet.
           </p>
         )}
+        
+        <DashboardSummary
+          monitors={monitors}
+          snapshots={snapshots}
+        />
 
         <AddMonitorForm
           onCreated={(created) => {
@@ -65,6 +86,7 @@ function App() {
               <MonitorCard
                 key={monitor.id}
                 monitor={monitor}
+                onSnapshot={handleSnapshot}
               />
             ))}
         </div>
