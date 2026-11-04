@@ -615,3 +615,120 @@ func TestGetStatsByMonitorID(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckRepositoryHistoryLimit(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		15*time.Second,
+	)
+	defer cancel()
+
+	db, err := Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+
+	var dbName string
+	if err := db.QueryRow(
+		ctx,
+		"SELECT current_database()",
+	).Scan(&dbName); err != nil {
+		t.Fatal(err)
+	}
+
+	if dbName != "pulse_test" {
+		t.Fatalf("Expected pulse_test, got %s", dbName)
+	}
+
+	monitorRepo := NewMonitorRepository(db)
+	checkRepo := NewCheckRepository(db)
+
+	testURL := fmt.Sprintf(
+		"https://example.com/history-limit-%d",
+		time.Now().UnixNano(),
+	)
+
+	created, err := monitorRepo.Create(
+		ctx,
+		"History Limit Test",
+		testURL,
+		60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cleanupCancel()
+
+		_, err := db.Exec(
+			cleanupCtx,
+			"DELETE FROM monitors WHERE id = $1",
+			created.ID,
+		)
+		if err != nil {
+			t.Errorf("Cleanup failed: %v", err)
+		}
+	})
+
+	savedIDs := make([]int64, 0, 35)
+
+	for i := 0; i < 35; i++ {
+		result := monitor.CheckResult{
+			URL:          testURL,
+			StatusCode:   200,
+			ResponseTime: time.Duration(100+i) * time.Millisecond,
+			Healthy:      true,
+		}
+
+		saved, err := checkRepo.Save(
+			ctx,
+			created.ID,
+			result,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		savedIDs = append(savedIDs, saved.ID)
+	}
+
+	records, err := checkRepo.GetByMonitorID(
+		ctx,
+		created.ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(records) != 30 {
+		t.Fatalf(
+			"Expected 30 results, got %d",
+			len(records),
+		)
+	}
+
+	for i, record := range records {
+		expectedID := savedIDs[34-i]
+
+		if record.ID != expectedID {
+			t.Errorf(
+				"At position %d: expected ID %d, got %d",
+				i,
+				expectedID,
+				record.ID,
+			)
+		}
+	}
+}

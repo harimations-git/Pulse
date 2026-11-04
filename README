@@ -6,5 +6,6 @@ set db connection string: $env:DATABASE_URL = "postgres://pulse:pulse_dev_passwo
 start api: go run ./cmd/api
 
 run entire test suits: go test ./... -v
+$env:TEST_DATABASE_URL = "postgres://pulse:pulse_dev_password@127.0.0.1:5432/pulse_test?sslmode=disable"
 
 ![Backend CI](https://github.com/harimations-git/pulse/actions/workflows/backend-ci.yml/badge.svg)git 

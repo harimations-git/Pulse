@@ -17,8 +17,7 @@ type ResponseTimeChartProps = {
 export default function ResponseTimeChart({ history, }: ResponseTimeChartProps) {
 
     const chartData = history
-        .slice(0, 30)
-        .reverse()
+        .toReversed()
         .map((record) => ({
             time: record.checkedAt,
             responseTimeMs: record.responseTimeMs,

@@ -286,3 +286,102 @@ func TestMonitorRepositoryGetByID(t *testing.T) {
 		t.Errorf("Expected pgx.ErrNoRows, got %v", err)
 	}
 }
+
+func TestMonitorRepositoryDelete(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+
+	ctx := context.Background()
+
+	db, err := Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+
+	// Confirm we're using the test database.
+	var dbName string
+
+	err = db.QueryRow(
+		ctx,
+		"SELECT current_database()",
+	).Scan(&dbName)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if dbName != "pulse_test" {
+		t.Fatalf(
+			"Expected pulse_test, got %s",
+			dbName,
+		)
+	}
+
+	repo := NewMonitorRepository(db)
+
+	// Create a temporary monitor.
+	testURL := fmt.Sprintf(
+		"https://example.com/delete-%d",
+		time.Now().UnixNano(),
+	)
+
+	created, err := repo.Create(
+		ctx,
+		"Delete Test Monitor",
+		testURL,
+		60,
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove any leftover test data if the test fails.
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+
+		_, err := db.Exec(
+			cleanupCtx,
+			"DELETE FROM monitors WHERE id = $1",
+			created.ID,
+		)
+		if err != nil {
+			t.Errorf("Cleanup failed: %v", err)
+		}
+	})
+
+	// Delete the monitor.
+	err = repo.Delete(ctx, created.ID)
+
+	if err != nil {
+		t.Fatalf("Failed to delete monitor: %v", err)
+	}
+
+	// Verify it no longer exists.
+	_, err = repo.GetByID(ctx, created.ID)
+
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf(
+			"Expected monitor to be deleted, got %v",
+			err,
+		)
+	}
+
+	// Deleting it again should return ErrNoRows.
+	err = repo.Delete(ctx, created.ID)
+
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf(
+			"Expected ErrNoRows, got %v",
+			err,
+		)
+	}
+}

@@ -119,3 +119,25 @@ func (repo *MonitorRepository) GetByID(ctx context.Context, id int64) (monitor.M
 
 	return m, nil
 }
+
+func (r *MonitorRepository) Delete(
+	ctx context.Context,
+	id int64,
+) error {
+	query := `
+        DELETE FROM monitors
+        WHERE id = $1
+        RETURNING id
+    `
+
+	var deletedID int64
+
+	err := r.DB.QueryRow(
+		ctx, query, id).Scan(&deletedID)
+
+	if err != nil {
+		return fmt.Errorf("Failed to delete monitor %d: %w", id, err)
+	}
+
+	return nil
+}

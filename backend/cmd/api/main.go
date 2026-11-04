@@ -20,6 +20,24 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+type CheckResponse struct {
+	URL            string  `json:"url"`
+	StatusCode     int     `json:"statusCode"`
+	ResponseTimeMs float64 `json:"responseTimeMs"`
+	Healthy        bool    `json:"healthy"`
+	Error          string  `json:"error,omitempty"`
+}
+
+type CheckRequest struct {
+	URL string `json:"url"`
+}
+
+type CreateMonitorRequest struct {
+	Name            string `json:"name"`
+	URL             string `json:"url"`
+	IntervalSeconds int    `json:"intervalSeconds"`
+}
+
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -119,6 +137,17 @@ func main() {
 				r,
 				repo,
 				checkRepo,
+			)
+		},
+	)
+
+	http.HandleFunc("DELETE /monitors/{id}",
+		func(w http.ResponseWriter, r *http.Request) {
+			deleteMonitorHandler(
+				w,
+				r,
+				repo,
+				guard,
 			)
 		},
 	)
@@ -382,7 +411,6 @@ func checkRegisteredMonitorHandler(
 		return
 	}
 
-	// 6. Return saved record as JSON
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 
@@ -448,20 +476,59 @@ func getMonitorStatsHandler(
 
 }
 
-type CheckResponse struct {
-	URL            string  `json:"url"`
-	StatusCode     int     `json:"statusCode"`
-	ResponseTimeMs float64 `json:"responseTimeMs"`
-	Healthy        bool    `json:"healthy"`
-	Error          string  `json:"error,omitempty"`
-}
+func deleteMonitorHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+	repo *database.MonitorRepository,
+	guard *monitor.CheckGuard,
+) {
+	// Extract monitor ID
+	idString := r.PathValue("id")
 
-type CheckRequest struct {
-	URL string `json:"url"`
-}
+	monitorID, err := strconv.ParseInt(idString, 10, 64)
 
-type CreateMonitorRequest struct {
-	Name            string `json:"name"`
-	URL             string `json:"url"`
-	IntervalSeconds int    `json:"intervalSeconds"`
+	if err != nil || monitorID <= 0 {
+		http.Error(
+			w,
+			"Invalid monitor ID",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	// Prevent deletion during an active check
+	if !guard.TryAcquire(monitorID) {
+		http.Error(
+			w,
+			"Monitor is currently being checked",
+			http.StatusConflict,
+		)
+		return
+	}
+
+	defer guard.Release(monitorID)
+
+	// Delete the monitor
+	err = repo.Delete(r.Context(), monitorID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		http.Error(
+			w,
+			"Monitor not found",
+			http.StatusNotFound,
+		)
+		return
+	}
+
+	if err != nil {
+		http.Error(
+			w,
+			"Failed to delete monitor",
+			http.StatusInternalServerError,
+		)
+		return
+	}
+
+	// Successful deletion returns no response body
+	w.WriteHeader(http.StatusNoContent)
 }

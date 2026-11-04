@@ -788,3 +788,242 @@ func TestGetMonitorStatsHandler(t *testing.T) {
 		}
 	})
 }
+
+func TestDeleteMonitorInvalidID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+	}{
+		{"Non-numeric ID", "invalid"},
+		{"Negative ID", "-1"},
+		{"Zero ID", "0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(
+				http.MethodDelete,
+				"/monitors/"+tt.id,
+				nil,
+			)
+
+			request.SetPathValue("id", tt.id)
+
+			recorder := httptest.NewRecorder()
+
+			deleteMonitorHandler(
+				recorder,
+				request,
+				nil,
+				nil,
+			)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Errorf(
+					"Expected 400, got %d",
+					recorder.Code,
+				)
+			}
+		})
+	}
+}
+
+func TestDeleteMonitorConflict(t *testing.T) {
+	guard := monitor.NewCheckGuard()
+
+	monitorID := int64(1)
+
+	// Simulate an active monitoring check
+	if !guard.TryAcquire(monitorID) {
+		t.Fatal("Expected to acquire monitor")
+	}
+
+	defer guard.Release(monitorID)
+
+	request := httptest.NewRequest(
+		http.MethodDelete,
+		"/monitors/1",
+		nil,
+	)
+
+	request.SetPathValue("id", "1")
+
+	recorder := httptest.NewRecorder()
+
+	deleteMonitorHandler(
+		recorder,
+		request,
+		nil,
+		guard,
+	)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf(
+			"Expected 409 Conflict, got %d: %s",
+			recorder.Code,
+			recorder.Body.String(),
+		)
+	}
+}
+
+func TestDeleteMonitorHandlerSuccess(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	db, err := database.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+
+	// Verify we're using the test database.
+	var dbName string
+
+	err = db.QueryRow(
+		ctx,
+		"SELECT current_database()",
+	).Scan(&dbName)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if dbName != "pulse_test" {
+		t.Fatalf("Expected pulse_test, got %s", dbName)
+	}
+
+	monitorRepo := database.NewMonitorRepository(db)
+	checkRepo := database.NewCheckRepository(db)
+
+	// Create a temporary monitor.
+	testURL := fmt.Sprintf(
+		"https://example.com/delete-%d",
+		time.Now().UnixNano(),
+	)
+
+	created, err := monitorRepo.Create(
+		ctx,
+		"Delete API Test",
+		testURL,
+		60,
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cleanupCancel()
+
+		_, err := db.Exec(
+			cleanupCtx,
+			"DELETE FROM monitors WHERE id = $1",
+			created.ID,
+		)
+
+		if err != nil {
+			t.Errorf("Cleanup failed: %v", err)
+		}
+	})
+
+	// Save a check to verify cascading deletion.
+	_, err = checkRepo.Save(
+		ctx,
+		created.ID,
+		monitor.CheckResult{
+			URL:          testURL,
+			StatusCode:   200,
+			ResponseTime: 100 * time.Millisecond,
+			Healthy:      true,
+		},
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	guard := monitor.NewCheckGuard()
+
+	// Helper to send DELETE requests.
+	sendDelete := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(
+			http.MethodDelete,
+			fmt.Sprintf("/monitors/%d", created.ID),
+			nil,
+		)
+
+		request.SetPathValue(
+			"id",
+			strconv.FormatInt(created.ID, 10),
+		)
+
+		recorder := httptest.NewRecorder()
+
+		deleteMonitorHandler(
+			recorder,
+			request,
+			monitorRepo,
+			guard,
+		)
+
+		return recorder
+	}
+
+	// First deletion should succeed.
+	recorder := sendDelete()
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf(
+			"Expected 204, got %d: %s",
+			recorder.Code,
+			recorder.Body.String(),
+		)
+	}
+
+	if recorder.Body.Len() != 0 {
+		t.Error("Expected an empty response body")
+	}
+
+	// Verify associated monitoring history was deleted.
+	var remainingChecks int
+
+	err = db.QueryRow(
+		ctx,
+		"SELECT COUNT(*) FROM check_results WHERE monitor_id = $1",
+		created.ID,
+	).Scan(&remainingChecks)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if remainingChecks != 0 {
+		t.Errorf(
+			"Expected 0 remaining checks, got %d",
+			remainingChecks,
+		)
+	}
+
+	// Deleting the same monitor again should return 404.
+	recorder = sendDelete()
+
+	if recorder.Code != http.StatusNotFound {
+		t.Errorf(
+			"Expected 404, got %d",
+			recorder.Code,
+		)
+	}
+}

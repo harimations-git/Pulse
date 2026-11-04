@@ -1,6 +1,6 @@
 
 import { useEffect, useState } from "react";
-import { checkMonitorNow, getMonitorHistory, getMonitorStats } from "../api/monitors";
+import { checkMonitorNow, deleteMonitor, getMonitorHistory, getMonitorStats } from "../api/monitors";
 import type { Monitor, MonitorStats } from "../types/monitor";
 import ResponseTimeChart from "./ResponseTimeChart";
 import type { CheckRecord } from "../types/checkRecord";
@@ -8,15 +8,19 @@ import type { MonitorSnapshot } from "../types/monitorSnapshot";
 
 type MonitorCardProps = {
   monitor: Monitor;
+
   onSnapshot: (
     monitorId: number,
     snapshot: MonitorSnapshot | null
   ) => void;
+
+  onDeleted: (monitorId: number) => void;
 };
 
 export default function MonitorCard({
   monitor,
   onSnapshot,
+  onDeleted,
 }: MonitorCardProps) {
   const [stats, setStats] = useState<MonitorStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -25,6 +29,9 @@ export default function MonitorCard({
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const [history, setHistory] = useState<CheckRecord[]>([]);
 
@@ -52,6 +59,29 @@ export default function MonitorCard({
       );
     } finally {
       setChecking(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (deleting || checking) return;
+
+    const confirmed = window.confirm(
+      `Delete "${monitor.name}"?\n\n` +
+      "This will permanently delete the monitor and all its monitoring history."
+    );
+
+    if (!confirmed) return;
+
+    setDeleting(true);
+    setDeleteError(null);
+
+    try {
+      await deleteMonitor(monitor.id);
+      onDeleted(monitor.id);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete monitor");
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -150,10 +180,19 @@ export default function MonitorCard({
           {checking ? "Checking..." : "Check Now"}
         </button>
 
-        {checking && (
-          <span role="status" className="text-xs text-slate-400">
-            Checking website...
-          </span>
+        <button
+          type="button"
+          onClick={() => void handleDelete()}
+          disabled={deleting || checking}
+          className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-400 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {deleting ? "Deleting..." : "Delete"}
+        </button>
+
+        {deleteError && (
+          <p role="alert" className="mt-3 text-sm text-red-400">
+            {deleteError}
+          </p>
         )}
       </div>
 

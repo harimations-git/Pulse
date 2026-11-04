@@ -66,7 +66,7 @@ export async function createMonitor(
     body: JSON.stringify(monitor),
   });
 
-  if(!response.ok){
+  if (!response.ok) {
     const message = await response.text();
     throw new Error(message || "Failed to create monitor");
   }
@@ -95,3 +95,27 @@ export async function checkMonitorNow(
     throw new Error("Failed to check monitor");
   }
 }
+
+export async function deleteMonitor(monitorId: number): Promise<void> {
+  const response = await fetch(
+    `/api//monitors/${monitorId}`,
+    {
+      method: "DELETE",
+    }
+  );
+
+  if (response.status === 409) {
+    throw new Error(
+      "This monitor is currently being checked. Try again shortly."
+    );
+  }
+
+  if (response.status === 404) {
+    throw new Error("Monitor not found.");
+  }
+
+  if (!response.ok) {
+    throw new Error("Failed to delete monitor.");
+  }
+}
+

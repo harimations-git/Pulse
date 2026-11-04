@@ -96,6 +96,7 @@ func (repo *CheckRepository) GetByMonitorID(ctx context.Context, monitorID int64
         FROM check_results
         WHERE monitor_id = $1
         ORDER BY checked_at DESC, id DESC
+		LIMIT 30
 	`, monitorID)
 
 	if err != nil {

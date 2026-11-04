@@ -26,6 +26,20 @@ function App() {
     []
   );
 
+  const handleMonitorDeleted = useCallback((monitorId: number) => {
+    setMonitors((current) => current.filter((monitor) => monitor.id !== monitorId));
+
+    setSnapshots((current) => {
+      const updated = { ...current };
+
+      delete updated[monitorId];
+
+      return updated;
+    });
+  },
+    []
+  );
+
   useEffect(() => {
     getMonitors()
       .then(setMonitors)
@@ -67,7 +81,7 @@ function App() {
             No monitors registered yet.
           </p>
         )}
-        
+
         <DashboardSummary
           monitors={monitors}
           snapshots={snapshots}
@@ -87,6 +101,7 @@ function App() {
                 key={monitor.id}
                 monitor={monitor}
                 onSnapshot={handleSnapshot}
+                onDeleted={handleMonitorDeleted}
               />
             ))}
         </div>
