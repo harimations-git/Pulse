@@ -66,7 +66,7 @@ export async function createMonitor(
     body: JSON.stringify(monitor),
   });
 
-  if (!response.ok) {
+  if(!response.ok){
     const message = await response.text();
     throw new Error(message || "Failed to create monitor");
   }

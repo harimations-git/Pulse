@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import {
     CartesianGrid,
     Line,
@@ -9,34 +8,13 @@ import {
     YAxis,
 } from "recharts";
 
-import { getMonitorHistory } from "../api/monitors";
 import type { CheckRecord } from "../types/checkRecord";
 
 type ResponseTimeChartProps = {
-    monitorId: number;
+    history: CheckRecord[];
 };
 
-export default function ResponseTimeChart({ monitorId, }: ResponseTimeChartProps) {
-    const [history, setHistory] = useState<CheckRecord[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
-
-    useEffect(() => {
-        const controller = new AbortController();
-
-        getMonitorHistory(monitorId, controller.signal).then(setHistory).catch((err: unknown) => {
-            if (!controller.signal.aborted) {
-                setError(err instanceof Error ? err.message : "Unknown error");
-            }
-        }).finally(() => {
-            if (!controller.signal.aborted) {
-                setLoading(false);
-            }
-        });
-
-        return () => controller.abort();
-    }, [monitorId]);
-
+export default function ResponseTimeChart({ history, }: ResponseTimeChartProps) {
 
     const chartData = history
         .slice(0, 30)
@@ -52,28 +30,15 @@ export default function ResponseTimeChart({ monitorId, }: ResponseTimeChartProps
                 Response time history
             </h4>
 
-            {loading && (
-                <p className="text-sm text-slate-400">
-                    Loading history...
-                </p>
-            )}
-
-            {error && (
-                <p role="alert" className="text-sm text-red-400">
-                    {error}
-                </p>
-            )}
-
-            {!loading && !error && history.length === 0 && (
+            {history.length === 0 ? (
                 <p className="text-sm text-slate-400">
                     No check history available yet.
                 </p>
-            )}
-
-            {!loading && !error && history.length > 0 && (
+            ) : (
                 <div className="h-48 w-full min-w-0">
                     <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={chartData}
+                        <LineChart
+                            data={chartData}
                             margin={{ top: 10, right: 10, left: 0, bottom: 5 }}
                         >
                             <CartesianGrid
@@ -134,5 +99,5 @@ export default function ResponseTimeChart({ monitorId, }: ResponseTimeChartProps
                 </div>
             )}
         </section>
-    )
+    );
 }
