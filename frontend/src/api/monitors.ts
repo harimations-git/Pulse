@@ -2,6 +2,13 @@
 import type { CheckRecord } from "../types/checkRecord";
 import type { Monitor, MonitorStats } from "../types/monitor";
 
+export type CreateMonitorRequest = {
+  name: string;
+  url: string;
+  intervalSeconds: number;
+};
+
+
 export async function getMonitors(): Promise<Monitor[]> {
   const response = await fetch("/api/monitors");
 
@@ -46,4 +53,23 @@ export async function getMonitorHistory(
   const data: CheckRecord[] | null = await response.json();
 
   return data ?? [];
+}
+
+export async function createMonitor(
+  monitor: CreateMonitorRequest
+): Promise<Monitor> {
+  const response = await fetch("/api/monitors", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(monitor),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Failed to create monitor");
+  }
+
+  return response.json();
 }

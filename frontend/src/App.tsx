@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { getMonitors } from "./api/monitors";
 import type { Monitor } from "./types/monitor";
 import MonitorCard from "./components/MonitorCard";
+import AddMonitorForm from "./components/AddMonitorForm";
 
 function App() {
   const [monitors, setMonitors] = useState<Monitor[]>([]);
@@ -50,6 +51,12 @@ function App() {
             No monitors registered yet.
           </p>
         )}
+
+        <AddMonitorForm
+          onCreated={(created) => {
+            setMonitors((current) => [...current, created]);
+          }}
+        />
 
         <div className="grid gap-4 md:grid-cols-2">
           {!loading &&
