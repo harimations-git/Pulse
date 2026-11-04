@@ -1,6 +1,6 @@
 
 import { useEffect, useState } from "react";
-import { getMonitorHistory, getMonitorStats } from "../api/monitors";
+import { checkMonitorNow, getMonitorHistory, getMonitorStats } from "../api/monitors";
 import type { Monitor, MonitorStats } from "../types/monitor";
 import ResponseTimeChart from "./ResponseTimeChart";
 import type { CheckRecord } from "../types/checkRecord";
@@ -22,11 +22,39 @@ export default function MonitorCard({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
   const [history, setHistory] = useState<CheckRecord[]>([]);
 
   const latestCheck = history[0];
 
   const status = loading ? "Loading..." : !latestCheck ? "Awaiting first check" : latestCheck.healthy ? "Healthy" : "Down";
+
+
+  async function handleCheckNow() {
+    if (checking) return;
+
+    setChecking(true);
+    setCheckError(null);
+
+    try {
+      await checkMonitorNow(monitor.id);
+
+      // Trigger a fresh statistics and history request.
+      setRefreshKey((current) => current + 1);
+    } catch (err) {
+      setCheckError(
+        err instanceof Error
+          ? err.message
+          : "Failed to check monitor"
+      );
+    } finally {
+      setChecking(false);
+    }
+  }
+
 
   useEffect(() => {
     const controller = new AbortController();
@@ -86,7 +114,7 @@ export default function MonitorCard({
       window.clearInterval(interval);
       controller.abort();
     };
-  }, [monitor.id, onSnapshot]);
+  }, [monitor.id, onSnapshot, refreshKey]);
 
   return (
     <article className="rounded-xl border border-slate-800 bg-slate-900 p-6">
@@ -110,6 +138,31 @@ export default function MonitorCard({
       <p className="mt-1 break-all text-sm text-slate-400">
         {monitor.url}
       </p>
+
+
+      <div className="mt-4 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => void handleCheckNow()}
+          disabled={checking}
+          className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-400 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {checking ? "Checking..." : "Check Now"}
+        </button>
+
+        {checking && (
+          <span role="status" className="text-xs text-slate-400">
+            Checking website...
+          </span>
+        )}
+      </div>
+
+      {checkError && (
+        <p role="alert" className="mt-3 text-sm text-red-400">
+          {checkError}
+        </p>
+      )}
+
 
       {
         loading && (

@@ -73,3 +73,25 @@ export async function createMonitor(
 
   return response.json();
 }
+
+
+export async function checkMonitorNow(
+  monitorId: number
+): Promise<void> {
+  const response = await fetch(
+    `/api/monitors/${monitorId}/check`,
+    {
+      method: "POST",
+    }
+  );
+
+  if (response.status === 409) {
+    throw new Error(
+      "This monitor is already being checked. Try again shortly."
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error("Failed to check monitor");
+  }
+}
